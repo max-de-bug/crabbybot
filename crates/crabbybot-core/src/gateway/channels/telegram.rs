@@ -295,7 +295,11 @@ Daily Loss Limit: ${}
 /config set solana_key <KEY>
 /config set model <MODEL>
 /config set max_bet <AMOUNT>
-/config set daily_limit <AMOUNT>",
+/config set daily_limit <AMOUNT>
+
+━━━ 🔄 Reset a value ━━━
+/config reset <KEY>
+/config reset all",
                                 groq_key, openai_key, anthropic_key, gemini_key, openrouter_key,
                                 config.agents.defaults.model,
                                 config.agents.defaults.max_tokens,
@@ -422,6 +426,62 @@ Daily Loss Limit: ${}
                                 Err(err_msg) => {
                                     let _ = _bot.send_message(msg.chat.id, format!("❌ {}", err_msg)).await;
                                 }
+                            }
+                            return respond(());
+                        }
+
+                        // Handle "reset <key>"
+                        if args_lower.starts_with("reset ") {
+                            let reset_args = args_str[6..].trim();
+                            let key = reset_args.to_lowercase();
+                            
+                            if key.is_empty() {
+                                let _ = _bot.send_message(msg.chat.id, "❌ Usage: /config reset <key> | /config reset all").await;
+                                return respond(());
+                            }
+
+                            let mut modified = false;
+
+                            if key == "all" {
+                                if let Some(p) = config.providers.groq.as_mut() { p.api_key.clear(); modified = true; }
+                                if let Some(p) = config.providers.openai.as_mut() { p.api_key.clear(); modified = true; }
+                                if let Some(p) = config.providers.anthropic.as_mut() { p.api_key.clear(); modified = true; }
+                                if let Some(p) = config.providers.gemini.as_mut() { p.api_key.clear(); modified = true; }
+                                if let Some(p) = config.providers.openrouter.as_mut() { p.api_key.clear(); modified = true; }
+                                if config.tools.polymarket.private_key.is_some() { config.tools.polymarket.private_key = None; modified = true; }
+                                if config.tools.solana_private_key.is_some() { config.tools.solana_private_key = None; modified = true; }
+                            } else {
+                                match key.as_str() {
+                                    "groq_key" => if let Some(p) = config.providers.groq.as_mut() { p.api_key.clear(); modified = true; },
+                                    "openai_key" => if let Some(p) = config.providers.openai.as_mut() { p.api_key.clear(); modified = true; },
+                                    "anthropic_key" => if let Some(p) = config.providers.anthropic.as_mut() { p.api_key.clear(); modified = true; },
+                                    "gemini_key" => if let Some(p) = config.providers.gemini.as_mut() { p.api_key.clear(); modified = true; },
+                                    "openrouter_key" => if let Some(p) = config.providers.openrouter.as_mut() { p.api_key.clear(); modified = true; },
+                                    "polymarket_key" => { config.tools.polymarket.private_key = None; modified = true; },
+                                    "solana_key" => { config.tools.solana_private_key = None; modified = true; },
+                                    _ => {
+                                        let _ = _bot.send_message(msg.chat.id, format!("❌ Unknown key: `{}`. Cannot reset.", key)).await;
+                                        return respond(());
+                                    }
+                                }
+                            }
+
+                            if modified {
+                                match config.save() {
+                                    Ok(()) => {
+                                        let msg_text = if key == "all" {
+                                            "✅ All keys have been reset to empty.\n⚠️ Restart the bot to apply changes."
+                                        } else {
+                                            "✅ Key has been reset to empty.\n⚠️ Restart the bot to apply changes."
+                                        };
+                                        let _ = _bot.send_message(msg.chat.id, msg_text).await;
+                                    }
+                                    Err(e) => {
+                                        let _ = _bot.send_message(msg.chat.id, format!("⚠️ Failed to save config: {}", e)).await;
+                                    }
+                                }
+                            } else {
+                                let _ = _bot.send_message(msg.chat.id, "✅ Key was already unset or empty.").await;
                             }
                             return respond(());
                         }

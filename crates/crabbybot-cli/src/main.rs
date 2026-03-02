@@ -235,9 +235,15 @@ fn setup_agent(
     let mut inner_providers = Vec::new();
     for (name, entry) in active_providers {
         let p_model = entry.model.as_deref().unwrap_or(&model);
+        
+        let api_key = crabbybot_core::vault::decrypt(&entry.api_key).unwrap_or_else(|e| {
+            tracing::warn!("Failed to decrypt API key for provider {}: {}", name, e);
+            entry.api_key.clone()
+        });
+
         let p = OpenAiProvider::new(
             name,
-            &entry.api_key,
+            &api_key,
             entry.api_base.as_deref(),
             p_model,
             client.clone(),
@@ -264,9 +270,13 @@ fn setup_agent(
     tools.register(Box::new(WebFetchTool::new(client.clone())), IntentCategory::Research);
 
     if !config.tools.web_search.api_key.is_empty() {
+        let ws_key = crabbybot_core::vault::decrypt(&config.tools.web_search.api_key).unwrap_or_else(|e| {
+            tracing::warn!("Failed to decrypt WebSearch API key: {}", e);
+            config.tools.web_search.api_key.clone()
+        });
         tools.register(Box::new(WebSearchTool::new(
             client.clone(),
-            &config.tools.web_search.api_key,
+            &ws_key,
             config.tools.web_search.max_results,
         )), IntentCategory::Research);
     }
@@ -301,7 +311,13 @@ fn setup_agent(
     tools.register(Box::new(PumpFunSearchTool::new(client.clone())), IntentCategory::CryptoTokens);
 
     // Polymarket read-only tools (markets, events, prices, data)
-    let pm = config.tools.polymarket.clone();
+    let mut pm = config.tools.polymarket.clone();
+    if let Some(ref pk) = pm.private_key {
+        pm.private_key = Some(crabbybot_core::vault::decrypt(pk).unwrap_or_else(|e| {
+            tracing::warn!("Failed to decrypt Polymarket private key: {}", e);
+            pk.clone()
+        }));
+    }
     tools.register(Box::new(PolymarketTrendingTool::new(pm.clone())), IntentCategory::PolymarketRead);
     tools.register(Box::new(PolymarketSearchTool::new(pm.clone())), IntentCategory::PolymarketRead);
     tools.register(Box::new(PolymarketMarketTool::new(pm.clone())), IntentCategory::PolymarketRead);
@@ -312,7 +328,7 @@ fn setup_agent(
     tools.register(Box::new(PolymarketOrderbookTool::new(pm.clone())), IntentCategory::PolymarketRead);
     tools.register(Box::new(PolymarketLastTradeTool::new(pm.clone())), IntentCategory::PolymarketRead);
     tools.register(Box::new(PolymarketClobMarketTool::new(pm.clone())), IntentCategory::PolymarketRead);
-    tools.register(Box::new(PolymarketTickSizeTool::new(pm)), IntentCategory::PolymarketRead);
+    tools.register(Box::new(PolymarketTickSizeTool::new(pm.clone())), IntentCategory::PolymarketRead);
     tools.register(Box::new(PolymarketPositionsTool::new()), IntentCategory::PolymarketRead);
     tools.register(Box::new(PolymarketLeaderboardTool::new()), IntentCategory::PolymarketRead);
     tools.register(Box::new(PolymarketClosedPositionsTool::new()), IntentCategory::PolymarketRead);
@@ -333,7 +349,7 @@ fn setup_agent(
     tools.register(Box::new(PolymarketSportsTool::new()), IntentCategory::PolymarketRead);
 
     // Polymarket authenticated trading tools (need POLYMARKET_PRIVATE_KEY)
-    let pm = config.tools.polymarket.clone();
+    let pm = pm.clone();
     tools.register(Box::new(PolymarketCreateOrderTool::new(pm.clone())), IntentCategory::PolymarketTrade);
     tools.register(Box::new(PolymarketMarketOrderTool::new(pm.clone())), IntentCategory::PolymarketTrade);
     tools.register(Box::new(PolymarketMyOrdersTool::new(pm.clone())), IntentCategory::PolymarketTrade);
@@ -357,10 +373,17 @@ fn setup_agent(
     tools.register(Box::new(RugCheckTool::new(client.clone())), IntentCategory::CryptoTokens);
     tools.register(Box::new(SentimentTool::new(client.clone())), IntentCategory::CryptoTokens);
     tools.register(Box::new(AlphaSummaryTool::new(client.clone())), IntentCategory::CryptoTokens);
+    let solana_private_key = config.tools.solana_private_key.as_ref().map(|k| {
+        crabbybot_core::vault::decrypt(k).unwrap_or_else(|e| {
+            tracing::warn!("Failed to decrypt Solana private key: {}", e);
+            k.clone()
+        })
+    });
+
     tools.register(Box::new(PumpFunBuyTool::new(
         client.clone(),
         &config.tools.solana_rpc_url,
-        config.tools.solana_private_key.clone(),
+        solana_private_key,
     )), IntentCategory::CryptoTokens);
     tools.register(Box::new(DiscoveryTool::new(bus, discovery_state.clone())), IntentCategory::CryptoTokens);
 
