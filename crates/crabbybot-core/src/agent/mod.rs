@@ -164,14 +164,7 @@ impl AgentLoop {
                 .await;
         }
 
-        // ── 2. Build history from token budget ────────────────────────
-        let session = self.sessions.get_or_create(session_key);
-        let history = session.get_history_within_budget(self.config.max_context_tokens);
-
-        // Add user message to session
-        session.add_message("user", content);
-
-        // ── 3. Build initial messages ─────────────────────────────────
+        // ── 2. Build context components ─────────────────────────────────
         let service_status = {
             let state = self.discovery_state.lock().await;
             if let Some(ref id) = state.active_chat_id {
@@ -189,6 +182,21 @@ impl AgentLoop {
             &chat_id,
             &service_status,
         );
+
+        // Estimate system prompt tokens so history budget doesn't overflow
+        let system_prompt = ctx.build_system_prompt(&[]);
+        let system_prompt_tokens = system_prompt.len() / 4;
+        let current_msg_tokens = content.len() / 4;
+        let overhead = system_prompt_tokens + current_msg_tokens + 50; // +50 token safety margin
+        let history_budget = self.config.max_context_tokens.saturating_sub(overhead);
+
+        let session = self.sessions.get_or_create(session_key);
+        let history = session.get_history_within_budget(history_budget);
+
+        // Add user message to session
+        session.add_message("user", content);
+
+        // ── 3. Build initial messages ─────────────────────────────────
         let mut messages = ctx.build_messages(&history, content, &[]);
 
         // ── 3.5 Intent Routing ────────────────────────────────────────
@@ -235,8 +243,8 @@ impl AgentLoop {
                     .await;
             }
 
-            // ── 5. LLM call ───────────────────────────────────────────
-            let response = self
+            // ── 5. LLM call (with 413 retry-with-trim) ────────────────
+            let response = match self
                 .provider
                 .chat(
                     &messages,
@@ -246,7 +254,30 @@ impl AgentLoop {
                     self.config.temperature,
                 )
                 .await
-                .map_err(AgentError::Provider)?;
+            {
+                Ok(r) => r,
+                Err(e) if e.to_string().contains("413") || e.to_string().contains("Payload Too Large") => {
+                    // Trim history by keeping only the system prompt + last 2 messages
+                    warn!("Request too large, trimming history and retrying");
+                    let keep = 3.min(messages.len()); // system + at most 2 recent
+                    let system_msg = messages[0].clone();
+                    let tail: Vec<_> = messages[messages.len().saturating_sub(keep - 1)..].to_vec();
+                    messages = vec![system_msg];
+                    messages.extend(tail);
+
+                    self.provider
+                        .chat(
+                            &messages,
+                            &tool_defs,
+                            self.config.model.as_deref(),
+                            self.config.max_tokens,
+                            self.config.temperature,
+                        )
+                        .await
+                        .map_err(AgentError::Provider)?
+                }
+                Err(e) => return Err(AgentError::Provider(e)),
+            };
 
             // ── 6. Build assistant message ────────────────────────────
             let tool_call_messages: Vec<ToolCallMessage> = response

@@ -23,6 +23,7 @@ use crabbybot_core::gateway::channels::discord::DiscordTransport;
 #[cfg(feature = "telegram")]
 use crabbybot_core::gateway::channels::telegram::TelegramTransport;
 use crabbybot_core::gateway::AgentBridge;
+use tracing::warn;
 use crabbybot_core::provider::openai::OpenAiProvider;
 use crabbybot_core::provider::LlmProvider;
 use crabbybot_core::session::SessionManager;
@@ -198,6 +199,17 @@ use crabbybot_core::tools::IntentCategory;
 /// `cmd_bot` can avoid duplicating this boilerplate.
 fn validate_config(config: &Config) -> Result<()> {
     if let Err(errors) = config.validate() {
+        let is_tg_enabled = config.channels.telegram.as_ref().is_some_and(|c| c.enabled && !c.token.is_empty());
+        let is_dc_enabled = config.channels.discord.as_ref().is_some_and(|c| c.enabled && !c.token.is_empty());
+
+        if is_tg_enabled || is_dc_enabled {
+            warn!("Configuration has errors, but starting in setup mode since a channel is enabled:");
+            for e in &errors {
+                warn!("  • {}", e);
+            }
+            return Ok(());
+        }
+
         eprintln!("\n  \x1b[31m❌ Configuration errors:\x1b[0m");
         for e in &errors {
             eprintln!("     • {}", e);
@@ -224,34 +236,34 @@ fn setup_agent(
 
     // Resolve providers
     let active_providers = config.providers.find_all_active();
-    if active_providers.is_empty() {
-        anyhow::bail!(
-            "No LLM provider configured with a real API key. \
-             Run `CrabbyBot onboard` first, then edit config.json"
-        );
-    }
+    
+    let provider: Box<dyn LlmProvider> = if active_providers.is_empty() {
+        warn!("No active LLM providers. Bot will start in limited setup mode.");
+        Box::new(crabbybot_core::provider::NoopProvider { model: model.clone() })
+    } else {
+        let client = reqwest::Client::new();
+        let mut inner_providers = Vec::new();
+        for (name, entry) in active_providers {
+            let p_model = entry.model.as_deref().unwrap_or(&model);
+            
+            let api_key = crabbybot_core::vault::decrypt(&entry.api_key).unwrap_or_else(|e| {
+                tracing::warn!("Failed to decrypt API key for provider {}: {}", name, e);
+                entry.api_key.clone()
+            });
+
+            let p = OpenAiProvider::new(
+                name,
+                &api_key,
+                entry.api_base.as_deref(),
+                p_model,
+                client.clone(),
+            );
+            inner_providers.push((name.to_string(), Box::new(p) as Box<dyn LlmProvider>));
+        }
+        Box::new(crabbybot_core::provider::FallbackProvider::new(inner_providers))
+    };
 
     let client = reqwest::Client::new();
-    let mut inner_providers = Vec::new();
-    for (name, entry) in active_providers {
-        let p_model = entry.model.as_deref().unwrap_or(&model);
-        
-        let api_key = crabbybot_core::vault::decrypt(&entry.api_key).unwrap_or_else(|e| {
-            tracing::warn!("Failed to decrypt API key for provider {}: {}", name, e);
-            entry.api_key.clone()
-        });
-
-        let p = OpenAiProvider::new(
-            name,
-            &api_key,
-            entry.api_base.as_deref(),
-            p_model,
-            client.clone(),
-        );
-        inner_providers.push((name.to_string(), Box::new(p) as Box<dyn LlmProvider>));
-    }
-
-    let provider = crabbybot_core::provider::FallbackProvider::new(inner_providers);
 
     // Set up tools
     let workspace = config.workspace_path();
@@ -398,11 +410,11 @@ fn setup_agent(
         temperature: config.agents.defaults.temperature,
         max_iterations: config.agents.defaults.max_tool_iterations,
         workspace: workspace.clone(),
-        max_context_tokens: 10_000,
+        max_context_tokens: 4_000,
     };
 
     let tools = Arc::new(tools);
-    let agent = AgentLoop::new(Box::new(provider), Arc::clone(&tools), agent_config, discovery_state);
+    let agent = AgentLoop::new(provider, Arc::clone(&tools), agent_config, discovery_state);
     Ok((agent, workspace, tools))
 }
 

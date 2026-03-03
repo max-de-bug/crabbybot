@@ -108,7 +108,10 @@ impl LlmProvider for FallbackProvider {
                         || err_str.contains("401")
                         || err_str.contains("403")
                         || err_str.contains("Unauthorized")
-                        || err_str.contains("User not found");
+                        || err_str.contains("User not found")
+                        // Payload too large — next provider may have higher context limit
+                        || err_str.contains("413")
+                        || err_str.contains("Payload Too Large");
 
                     if is_failover {
                         warn!(
@@ -142,5 +145,31 @@ impl LlmProvider for FallbackProvider {
             .first()
             .map(|(_, p)| p.default_model())
             .unwrap_or("")
+    }
+}
+
+/// A dummy provider that always returns an error.
+/// 
+/// Used when no real providers are configured but the bot needs to start
+/// (e.g. for configuration via Telegram).
+pub struct NoopProvider {
+    pub model: String,
+}
+
+#[async_trait]
+impl LlmProvider for NoopProvider {
+    async fn chat(
+        &self,
+        _messages: &[ChatMessage],
+        _tools: &[ToolDefinition],
+        _model: Option<&str>,
+        _max_tokens: u32,
+        _temperature: f32,
+    ) -> anyhow::Result<LlmResponse> {
+        anyhow::bail!("No LLM provider configured. Use `/config set groq_key <KEY>` to enable the bot.")
+    }
+
+    fn default_model(&self) -> &str {
+        &self.model
     }
 }
