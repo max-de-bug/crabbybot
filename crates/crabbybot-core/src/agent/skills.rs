@@ -3,8 +3,14 @@
 //! Skills are markdown files (`SKILL.md`) that teach the agent how to
 //! perform specific tasks. Each skill lives in its own directory and
 //! can have YAML frontmatter with metadata.
+//!
+//! Skills can declare an `intent-category` in frontmatter so they are
+//! automatically loaded when the [`IntentRouter`] classifies a message
+//! into a matching category.
 
 use std::path::{Path, PathBuf};
+
+use crate::tools::IntentCategory;
 
 /// Loaded skill info.
 #[derive(Debug, Clone)]
@@ -13,6 +19,13 @@ pub struct SkillInfo {
     pub description: String,
     pub path: PathBuf,
     pub source: String,
+    /// Optional: the intent category this skill is associated with.
+    /// When set, the skill is auto-loaded whenever the router
+    /// classifies a message into this category.
+    pub intent_category: Option<IntentCategory>,
+    /// Whether the skill can be invoked directly by users (e.g. via
+    /// a `/skill-name` slash command). Defaults to `false`.
+    pub user_invocable: bool,
 }
 
 pub struct SkillsLoader {
@@ -41,6 +54,19 @@ impl SkillsLoader {
         }
 
         skills
+    }
+
+    /// Return skill names that match the given intent category.
+    ///
+    /// This enables automatic skill activation: when the [`IntentRouter`]
+    /// classifies a message, the agent loads all skills tagged with the
+    /// matching category — zero user intervention required.
+    pub fn skills_for_intent(&self, category: IntentCategory) -> Vec<String> {
+        self.list_skills()
+            .into_iter()
+            .filter(|s| s.intent_category == Some(category))
+            .map(|s| s.name)
+            .collect()
     }
 
     /// Load a skill by name.
@@ -77,9 +103,13 @@ impl SkillsLoader {
 
         let mut lines = vec!["<skills>".to_owned()];
         for skill in &skills {
+            let category_attr = skill
+                .intent_category
+                .map(|c| format!(" intent=\"{}\"", c.as_str()))
+                .unwrap_or_default();
             lines.push(format!(
-                "  <skill name=\"{}\" source=\"{}\">{}</skill>",
-                skill.name, skill.source, skill.description
+                "  <skill name=\"{}\" source=\"{}\"{}>{}</skill>",
+                skill.name, skill.source, category_attr, skill.description
             ));
         }
         lines.push("</skills>".to_owned());
@@ -110,16 +140,29 @@ impl SkillsLoader {
                 .to_string_lossy()
                 .into_owned();
 
-            let description = std::fs::read_to_string(&skill_file)
-                .ok()
-                .and_then(|c| extract_description(&c))
+            let raw_content = std::fs::read_to_string(&skill_file).ok();
+
+            let description = raw_content
+                .as_deref()
+                .and_then(extract_description)
                 .unwrap_or_else(|| format!("Skill: {}", name));
+
+            let intent_category = raw_content
+                .as_deref()
+                .and_then(extract_intent_category);
+
+            let user_invocable = raw_content
+                .as_deref()
+                .and_then(extract_user_invocable)
+                .unwrap_or(false);
 
             out.push(SkillInfo {
                 name,
                 description,
                 path: skill_file,
                 source: source.to_owned(),
+                intent_category,
+                user_invocable,
             });
         }
     }
@@ -127,17 +170,63 @@ impl SkillsLoader {
 
 /// Extract the `description` field from YAML frontmatter.
 fn extract_description(content: &str) -> Option<String> {
+    extract_field(content, "description")
+}
+
+/// Extract the `intent-category` field from YAML frontmatter and parse
+/// it into an [`IntentCategory`].
+fn extract_intent_category(content: &str) -> Option<IntentCategory> {
+    let raw = extract_field(content, "intent-category")?;
+    match raw.to_lowercase().as_str() {
+        "polymarket-read" | "polymarket_read" => Some(IntentCategory::PolymarketRead),
+        "polymarket-trade" | "polymarket_trade" => Some(IntentCategory::PolymarketTrade),
+        "crypto" | "crypto-tokens" | "crypto_tokens" => Some(IntentCategory::CryptoTokens),
+        "system" => Some(IntentCategory::System),
+        "research" => Some(IntentCategory::Research),
+        "general" => Some(IntentCategory::General),
+        _ => None,
+    }
+}
+
+/// Extract the `user-invocable` boolean field from YAML frontmatter.
+fn extract_user_invocable(content: &str) -> Option<bool> {
+    let raw = extract_field(content, "user-invocable")?;
+    match raw.to_lowercase().as_str() {
+        "true" | "yes" => Some(true),
+        "false" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+/// Generic field extractor for simple `key: value` YAML frontmatter.
+///
+/// Handles both single-line values and multi-line folded block scalars (`>`).
+fn extract_field(content: &str, key: &str) -> Option<String> {
     if !content.starts_with("---") {
         return None;
     }
 
     let end = content[3..].find("---")?;
     let frontmatter = &content[3..3 + end];
+    let prefix = format!("{}:", key);
 
     for line in frontmatter.lines() {
-        let line = line.trim();
-        if let Some(desc) = line.strip_prefix("description:") {
-            return Some(desc.trim().trim_matches('"').trim_matches('\'').to_string());
+        let trimmed = line.trim();
+        if let Some(val) = trimmed.strip_prefix(&prefix) {
+            let val = val.trim().trim_matches('"').trim_matches('\'');
+            // Handle folded block scalar (`>`) — join continuation lines
+            if val == ">" || val.is_empty() {
+                let rest: String = frontmatter
+                    .lines()
+                    .skip_while(|l| !l.trim().starts_with(&prefix))
+                    .skip(1)
+                    .take_while(|l| l.starts_with(' ') || l.starts_with('\t'))
+                    .map(|l| l.trim())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                return if rest.is_empty() { None } else { Some(rest) };
+            }
+            return Some(val.to_string());
         }
     }
 
@@ -161,21 +250,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_strip_frontmatter() {
+    fn strip_frontmatter_removes_yaml() {
         let content = "---\ndescription: test\n---\n\nHello world";
         assert_eq!(strip_frontmatter(content), "Hello world");
     }
 
     #[test]
-    fn test_extract_description() {
+    fn extract_description_simple() {
         let content = "---\ndescription: \"My cool skill\"\n---\n\nContent here";
         assert_eq!(extract_description(content), Some("My cool skill".into()));
     }
 
     #[test]
-    fn test_no_frontmatter() {
+    fn extract_description_folded_block_scalar() {
+        let content =
+            "---\nname: test\ndescription: >\n  Advanced prediction market\n  analysis for Polymarket.\n---\n\nBody";
+        let desc = extract_description(content).unwrap();
+        assert!(desc.contains("Advanced prediction market"));
+        assert!(desc.contains("analysis for Polymarket."));
+    }
+
+    #[test]
+    fn extract_intent_category_parses_variants() {
+        let content = "---\nintent-category: polymarket-read\n---\n";
+        assert_eq!(
+            extract_intent_category(content),
+            Some(IntentCategory::PolymarketRead)
+        );
+
+        let content = "---\nintent-category: crypto\n---\n";
+        assert_eq!(
+            extract_intent_category(content),
+            Some(IntentCategory::CryptoTokens)
+        );
+    }
+
+    #[test]
+    fn extract_user_invocable_parses_true() {
+        let content = "---\nuser-invocable: true\n---\n";
+        assert_eq!(extract_user_invocable(content), Some(true));
+    }
+
+    #[test]
+    fn extract_user_invocable_defaults_none_if_missing() {
+        let content = "---\nname: test\n---\n";
+        assert_eq!(extract_user_invocable(content), None);
+    }
+
+    #[test]
+    fn no_frontmatter_returns_none() {
         let content = "Just plain markdown";
         assert_eq!(strip_frontmatter(content), "Just plain markdown");
         assert_eq!(extract_description(content), None);
+        assert_eq!(extract_intent_category(content), None);
+    }
+
+    #[test]
+    fn extract_field_unquoted_value() {
+        let content = "---\nname: my-skill\n---\n";
+        assert_eq!(extract_field(content, "name"), Some("my-skill".into()));
     }
 }

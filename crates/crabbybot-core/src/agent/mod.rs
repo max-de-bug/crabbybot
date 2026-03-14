@@ -196,14 +196,26 @@ impl AgentLoop {
         // Add user message to session
         session.add_message("user", content);
 
-        // ── 3. Build initial messages ─────────────────────────────────
-        let mut messages = ctx.build_messages(&history, content, &[]);
+
 
         // ── 3.5 Intent Routing ────────────────────────────────────────
         // Classify intent via zero-cost keyword matching (no LLM call)
         let category = IntentRouter::classify(content);
 
         info!(session = session_key, category = category.as_str(), "Loaded filtered tools");
+
+        // ── 3.6 Auto-activate skills for this intent ─────────────────
+        let skill_names = self.skills.skills_for_intent(category);
+        if !skill_names.is_empty() {
+            info!(
+                skills = ?skill_names,
+                category = category.as_str(),
+                "Auto-activated skills for intent"
+            );
+        }
+
+        // Rebuild messages with activated skills in the system prompt
+        let mut messages = ctx.build_messages(&history, content, &skill_names);
 
         // ── 4. Tool definitions ───────────────────────────────────────
         let tool_defs = self.tools.definitions_for(category);
