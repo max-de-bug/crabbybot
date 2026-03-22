@@ -58,3 +58,23 @@ pub mod service;
 pub mod session;
 pub mod tools;
 pub mod vault;
+
+// ── Process-wide restart signal ──────────────────────────────────────────────
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global flag indicating that a restart has been requested (e.g. via Telegram `/restart`).
+///
+/// The CLI main loop checks this after `cmd_bot_once()` returns. If `true`,
+/// the bot tears down gracefully and re-initializes from fresh config.
+static RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Request a graceful restart of the bot process.
+pub fn request_restart() {
+    RESTART_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// Check (and optionally clear) whether a restart was requested.
+pub fn take_restart_request() -> bool {
+    RESTART_REQUESTED.swap(false, Ordering::SeqCst)
+}

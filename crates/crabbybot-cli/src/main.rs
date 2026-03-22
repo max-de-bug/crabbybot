@@ -478,6 +478,23 @@ async fn cmd_bot() -> Result<()> {
     }
     let _guard = LockGuard(lock_path.clone());
 
+    // ── Restart loop ─────────────────────────────────────────────────
+    loop {
+        let cancel = CancellationToken::new();
+        cmd_bot_once(cancel).await?;
+
+        if !crabbybot_core::take_restart_request() {
+            break;
+        }
+        println!("  🔄 Restarting CrabbyBot...");
+        // Small delay to let sockets and resources clean up
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    Ok(())
+}
+
+async fn cmd_bot_once(cancel: CancellationToken) -> Result<()> {
     let config = Config::load()?;
     validate_config(&config)?;
 
@@ -552,7 +569,7 @@ async fn cmd_bot() -> Result<()> {
                 let bus_for_tel = Arc::clone(&bus_arc);
                 let allow_from = tel_config.allow_from.clone();
                 let transport =
-                    TelegramTransport::new(tel_config.token.clone(), bus_for_tel, allow_from);
+                    TelegramTransport::new(tel_config.token.clone(), bus_for_tel, allow_from, cancel.clone());
                 services.spawn(async move {
                     if let Err(e) = transport.run().await {
                         tracing::error!("Telegram transport failed: {}", e);
@@ -591,7 +608,6 @@ async fn cmd_bot() -> Result<()> {
     });
 
     // 3. Agent Bridge Task — with CancellationToken for graceful shutdown
-    let cancel = CancellationToken::new();
     let bus_for_bridge = Arc::clone(&bus_arc);
     let bridge = AgentBridge::new(
         bus_for_bridge,
@@ -663,8 +679,11 @@ async fn cmd_bot() -> Result<()> {
         });
     }
 
-    // Wait for Ctrl+C, or for any critical service to exit unexpectedly.
+    // Wait for cancel token, Ctrl+C, or for any critical service to exit unexpectedly.
     tokio::select! {
+        _ = cancel.cancelled() => {
+            println!("\n  ⏳ Shutting down gracefully...");
+        }
         _ = tokio::signal::ctrl_c() => {
             println!("\n  ⏳ Shutting down gracefully...");
         }

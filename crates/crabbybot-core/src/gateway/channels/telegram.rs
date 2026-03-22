@@ -7,6 +7,7 @@ use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::MessageId;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 /// Maximum Telegram message length.
@@ -34,14 +35,16 @@ pub struct TelegramTransport {
     token: String,
     bus: Arc<MessageBus>,
     allow_from: Vec<String>,
+    cancel: CancellationToken,
 }
 
 impl TelegramTransport {
-    pub fn new(token: String, bus: Arc<MessageBus>, allow_from: Vec<String>) -> Self {
+    pub fn new(token: String, bus: Arc<MessageBus>, allow_from: Vec<String>, cancel: CancellationToken) -> Self {
         Self {
             token,
             bus,
             allow_from,
+            cancel,
         }
     }
 
@@ -213,7 +216,7 @@ impl TelegramTransport {
         let allow_from = self.allow_from.clone();
 
         let message_handler = Update::filter_message().endpoint(
-            move |_bot: Bot, msg: Message, bus: Arc<MessageBus>, allow_from: Vec<String>| async move {
+            move |_bot: Bot, msg: Message, bus: Arc<MessageBus>, allow_from: Vec<String>, cancel: CancellationToken| async move {
                 let user_id = msg.from.as_ref().map(|u| u.id.to_string()).unwrap_or_else(|| "unknown".to_owned());
 
                 // Enforce allowFrom ACL
@@ -229,6 +232,14 @@ impl TelegramTransport {
                 if let Some(text) = msg.text() {
                     let normalized = text.trim();
                     let lower = normalized.to_lowercase();
+
+                    // ── FAST PATH: /restart command ──
+                    if lower == "/restart" || lower == "restart" {
+                        let _ = _bot.send_message(msg.chat.id, "🔄 Restarting CrabbyBot… please wait a few seconds.").await;
+                        crate::request_restart();
+                        cancel.cancel();
+                        return respond(());
+                    }
 
                     // ── FAST PATH: /config command (bypass LLM) ──
                     if lower == "/config" || lower == "config"
@@ -442,7 +453,10 @@ Daily Loss Limit: ${}
                                 Ok(success_msg) => {
                                     match config.save() {
                                         Ok(()) => {
-                                            let _ = _bot.send_message(msg.chat.id, format!("✅ {} — saved to config.json{}\n⚠️ Restart the bot to apply changes.", success_msg, security_note)).await;
+                                            let _ = _bot.send_message(msg.chat.id, format!("✅ {} — saved to config.json{}\n🔄 Restarting to apply changes…", success_msg, security_note)).await;
+                                            // Trigger automatic restart so config takes effect
+                                            crate::request_restart();
+                                            cancel.cancel();
                                         }
                                         Err(e) => {
                                             let _ = _bot.send_message(msg.chat.id, format!("⚠️ {} — but failed to save: {}", success_msg, e)).await;
@@ -635,12 +649,23 @@ Daily Loss Limit: ${}
             .branch(message_handler)
             .branch(callback_handler);
 
-        Dispatcher::builder(bot, handler)
-            .dependencies(dptree::deps![bus, allow_from])
-            .enable_ctrlc_handler()
-            .build()
-            .dispatch()
-            .await;
+        let cancel = self.cancel.clone();
+        let mut dispatcher = Dispatcher::builder(bot, handler)
+            .dependencies(dptree::deps![bus, allow_from, cancel])
+            .build();
+
+        // Grab the shutdown token so we can stop the dispatcher programmatically
+        let shutdown_token = dispatcher.shutdown_token();
+        let cancel_for_shutdown = self.cancel.clone();
+        tokio::spawn(async move {
+            cancel_for_shutdown.cancelled().await;
+            match shutdown_token.shutdown() {
+                Ok(fut) => fut.await,
+                Err(e) => error!("Dispatcher shutdown error: {:?}", e),
+            }
+        });
+
+        dispatcher.dispatch().await;
 
         Ok(())
     }
