@@ -78,6 +78,8 @@ use crabbybot_core::tools::solana::{
 };
 use crabbybot_core::tools::web::{WebFetchTool, WebSearchTool};
 use crabbybot_core::tools::betting_control::BettingControlTool;
+use crabbybot_core::tools::prediction::{GraphQueryTool, PredictTool, SimulateTool};
+use crabbybot_core::tools::prediction::tool_predict::PredictionState;
 use crabbybot_core::tools::ToolRegistry;
 use crabbybot_core::service::betting::{BettingService, BettingState};
 
@@ -264,6 +266,9 @@ fn setup_agent(
         Box::new(crabbybot_core::provider::FallbackProvider::new(inner_providers))
     };
 
+    let provider: Arc<tokio::sync::Mutex<Box<dyn LlmProvider>>> =
+        Arc::new(tokio::sync::Mutex::new(provider));
+
     let client = reqwest::Client::new();
 
     // Set up tools
@@ -414,6 +419,15 @@ fn setup_agent(
         workspace: workspace.clone(),
         max_context_tokens: 4_000,
     };
+
+    // Prediction engine tools (share LLM provider via Arc<Mutex<...>>)
+    let prediction_state = Arc::new(PredictionState {
+        provider: Arc::clone(&provider),
+        workspace: workspace.clone(),
+    });
+    tools.register(Box::new(PredictTool { state: Arc::clone(&prediction_state) }), IntentCategory::Prediction);
+    tools.register(Box::new(SimulateTool { state: Arc::clone(&prediction_state) }), IntentCategory::Prediction);
+    tools.register(Box::new(GraphQueryTool { workspace: workspace.clone() }), IntentCategory::Prediction);
 
     let tools = Arc::new(tools);
     let agent = AgentLoop::new(provider, Arc::clone(&tools), agent_config, discovery_state);

@@ -99,7 +99,7 @@ impl Default for AgentConfig {
 /// let agent = Arc::new(Mutex::new(AgentLoop::new(provider, tools, config)));
 /// ```
 pub struct AgentLoop {
-    provider: Box<dyn LlmProvider>,
+    provider: Arc<Mutex<Box<dyn LlmProvider>>>,
     tools: Arc<ToolRegistry>,
     memory: MemoryStore,
     skills: SkillsLoader,
@@ -110,7 +110,7 @@ pub struct AgentLoop {
 
 impl AgentLoop {
     pub fn new(
-        provider: Box<dyn LlmProvider>,
+        provider: Arc<Mutex<Box<dyn LlmProvider>>>,
         tools: Arc<ToolRegistry>,
         config: AgentConfig,
         discovery_state: Arc<Mutex<StreamState>>,
@@ -258,6 +258,8 @@ impl AgentLoop {
             // ── 5. LLM call (with 413 retry-with-trim) ────────────────
             let response = match self
                 .provider
+                .lock()
+                .await
                 .chat(
                     &messages,
                     &tool_defs,
@@ -278,6 +280,8 @@ impl AgentLoop {
                     messages.extend(tail);
 
                     self.provider
+                        .lock()
+                        .await
                         .chat(
                             &messages,
                             &tool_defs,
@@ -552,7 +556,7 @@ mod tests {
             active_chat_id: None,
         }));
         let mut agent = AgentLoop::new(
-            Box::new(provider),
+            Arc::new(Mutex::new(Box::new(provider))),
             Arc::new(tools),
             make_config(tmp.clone()),
             discovery_state,
@@ -612,7 +616,7 @@ mod tests {
             active_chat_id: None,
         }));
         let mut agent = AgentLoop::new(
-            Box::new(provider),
+            Arc::new(Mutex::new(Box::new(provider))),
             Arc::new(registry),
             make_config(tmp),
             discovery_state,
@@ -661,7 +665,7 @@ mod tests {
             worker: None,
             active_chat_id: None,
         }));
-        let mut agent = AgentLoop::new(Box::new(provider), Arc::new(registry), config, discovery_state);
+        let mut agent = AgentLoop::new(Arc::new(Mutex::new(Box::new(provider))), Arc::new(registry), config, discovery_state);
 
         let err = agent
             .process("loop forever", "cli:direct", None)
