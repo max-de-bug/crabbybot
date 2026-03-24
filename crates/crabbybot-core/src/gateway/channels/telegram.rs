@@ -257,6 +257,39 @@ impl TelegramTransport {
                         use crate::config::Config;
                         let mut config = Config::load().unwrap_or_default();
 
+                        // ── Helper: detect which provider the current model belongs to ──
+                        let detect_model_provider = |model: &str| -> &'static str {
+                            let m = model.to_lowercase();
+                            if m.starts_with("gemini") { "gemini" }
+                            else if m.starts_with("claude") || m.starts_with("anthropic/") { "anthropic" }
+                            else if m.starts_with("gpt") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("openai/") { "openai" }
+                            else if m.starts_with("deepseek") { "deepseek" }
+                            else if m.starts_with("llama") || m.starts_with("mixtral") || m.starts_with("groq/") { "groq" }
+                            else if m.contains('/') { "openrouter" }
+                            else { "unknown" }
+                        };
+
+                        let provider_display_name = |id: &str| -> &'static str {
+                            match id {
+                                "groq" => "Groq", "openai" => "OpenAI", "anthropic" => "Anthropic",
+                                "deepseek" => "DeepSeek", "gemini" => "Gemini", "openrouter" => "OpenRouter",
+                                _ => "Unknown",
+                            }
+                        };
+
+                        // ── /config model — quick check ──
+                        if args_lower == "model" {
+                            let model_str = &config.agents.defaults.model;
+                            let prov_id = detect_model_provider(model_str);
+                            let prov_name = provider_display_name(prov_id);
+                            let reply = format!(
+                                "🤖 Current Model\n\nModel: {}\nProvider: {}\nMax Tokens: {}",
+                                model_str, prov_name, config.agents.defaults.max_tokens
+                            );
+                            let _ = _bot.send_message(msg.chat.id, reply).await;
+                            return respond(());
+                        }
+
                         if args_str.is_empty() || args_lower == "help" || args_lower == "--help" {
                             // Show current config summary with masked keys
                             let mask = |s: &str| -> String {
@@ -274,49 +307,33 @@ impl TelegramTransport {
                             let poly_key = config.tools.polymarket.private_key.as_deref().map(|k| mask(k)).unwrap_or("❌ not set".into());
                             let solana_key = config.tools.solana_private_key.as_deref().map(|k| mask(k)).unwrap_or("❌ not set".into());
 
-                            let active_prov = config.providers.find_active().map(|(n, _)| n).unwrap_or("");
+                            // Mark the provider that matches the MODEL as active (not just the first valid key)
+                            let model_prov_id = detect_model_provider(&config.agents.defaults.model);
                             let p_label = |name: &str, label: &str| -> String {
-                                if name == active_prov {
+                                if name == model_prov_id {
                                     format!("{} 🟢 (Active)", label)
                                 } else {
                                     label.to_string()
                                 }
                             };
 
-                            // Detect which provider the current model belongs to
+                            // Check if the active model's provider has a valid key
                             let model_str = &config.agents.defaults.model;
-                            let model_lower = model_str.to_lowercase();
-                            let detected_provider = if model_lower.starts_with("gemini") {
-                                "Gemini"
-                            } else if model_lower.starts_with("claude") || model_lower.starts_with("anthropic/") {
-                                "Anthropic"
-                            } else if model_lower.starts_with("gpt") || model_lower.starts_with("o1") || model_lower.starts_with("o3") || model_lower.starts_with("openai/") {
-                                "OpenAI"
-                            } else if model_lower.starts_with("deepseek") {
-                                "DeepSeek"
-                            } else if model_lower.starts_with("llama") || model_lower.starts_with("mixtral") || model_lower.starts_with("groq/") {
-                                "Groq"
-                            } else if model_lower.contains('/') {
-                                "OpenRouter"
-                            } else {
-                                "Unknown"
-                            };
-
-                            // Check if the detected provider has a valid key
-                            let provider_has_key = match detected_provider {
-                                "Gemini" => gemini_key != "❌ not set",
-                                "Anthropic" => anthropic_key != "❌ not set",
-                                "OpenAI" => openai_key != "❌ not set",
-                                "DeepSeek" => deepseek_key != "❌ not set",
-                                "Groq" => groq_key != "❌ not set",
-                                "OpenRouter" => openrouter_key != "❌ not set",
+                            let prov_name = provider_display_name(model_prov_id);
+                            let provider_has_key = match model_prov_id {
+                                "gemini" => gemini_key != "❌ not set",
+                                "anthropic" => anthropic_key != "❌ not set",
+                                "openai" => openai_key != "❌ not set",
+                                "deepseek" => deepseek_key != "❌ not set",
+                                "groq" => groq_key != "❌ not set",
+                                "openrouter" => openrouter_key != "❌ not set",
                                 _ => false,
                             };
 
                             let model_status = if provider_has_key {
-                                format!("{} → {} ✅", model_str, detected_provider)
+                                format!("{} → {} ✅", model_str, prov_name)
                             } else {
-                                format!("{} → {} ⚠️ (no API key!)", model_str, detected_provider)
+                                format!("{} → {} ⚠️ (no API key!)", model_str, prov_name)
                             };
 
                             let summary = format!(
@@ -333,6 +350,7 @@ impl TelegramTransport {
 ━━━ 🤖 Agent ━━━
 Model: {}
 Max Tokens: {}
+Temperature: {}
 
 ━━━ 🔐 Wallet Keys ━━━
 Polymarket: {}
@@ -342,8 +360,13 @@ Solana: {}
 Enabled: {}
 Max Bet: ${}
 Daily Loss Limit: ${}
+Strategy: {}
+Scan Interval: {} min
 
 ━━━ ✏️ Set a value ━━━
+/config set model <MODEL>
+/config set max_tokens <NUMBER>
+/config set temperature <0.0-2.0>
 /config set groq_key <KEY>
 /config set openai_key <KEY>
 /config set anthropic_key <KEY>
@@ -352,9 +375,14 @@ Daily Loss Limit: ${}
 /config set openrouter_key <KEY>
 /config set polymarket_key <KEY>
 /config set solana_key <KEY>
-/config set model <MODEL>
+/config set betting_enabled <true|false>
 /config set max_bet <AMOUNT>
 /config set daily_limit <AMOUNT>
+/config set strategy <value|momentum|contrarian>
+/config set scan_interval <MINUTES>
+
+━━━ 🔍 Quick check ━━━
+/config model
 
 ━━━ 🔄 Reset a value ━━━
 /config reset <SETTING_NAME>
@@ -367,10 +395,13 @@ Daily Loss Limit: ${}
                                 p_label("openrouter", "OpenRouter"), openrouter_key,
                                 model_status,
                                 config.agents.defaults.max_tokens,
+                                config.agents.defaults.temperature,
                                 poly_key, solana_key,
                                 if config.tools.betting.enabled { "🟢" } else { "🔴" },
                                 config.tools.betting.max_bet_size_usdc,
                                 config.tools.betting.daily_loss_limit_usdc,
+                                config.tools.betting.strategy,
+                                config.tools.betting.scan_interval_minutes,
                             );
                             let _ = _bot.send_message(msg.chat.id, summary).await;
                             return respond(());
@@ -464,6 +495,26 @@ Daily Loss Limit: ${}
                                     config.agents.defaults.model = value.clone();
                                     Ok(format!("Model set to: {}", value))
                                 }
+                                "max_tokens" => {
+                                    match value.parse::<u32>() {
+                                        Ok(v) => { config.agents.defaults.max_tokens = v; Ok(format!("Max tokens set to {}", v)) }
+                                        Err(_) => Err("Invalid number".to_string())
+                                    }
+                                }
+                                "temperature" => {
+                                    match value.parse::<f32>() {
+                                        Ok(v) if (0.0..=2.0).contains(&v) => { config.agents.defaults.temperature = v; Ok(format!("Temperature set to {}", v)) }
+                                        Ok(_) => Err("Temperature must be between 0.0 and 2.0".to_string()),
+                                        Err(_) => Err("Invalid number".to_string())
+                                    }
+                                }
+                                "betting_enabled" => {
+                                    match value.to_lowercase().as_str() {
+                                        "true" | "1" | "yes" | "on" => { config.tools.betting.enabled = true; Ok("Betting enabled 🟢".to_string()) }
+                                        "false" | "0" | "no" | "off" => { config.tools.betting.enabled = false; Ok("Betting disabled 🔴".to_string()) }
+                                        _ => Err("Use true/false, on/off, or yes/no".to_string())
+                                    }
+                                }
                                 "max_bet" => {
                                     match value.parse::<f64>() {
                                         Ok(v) => { config.tools.betting.max_bet_size_usdc = v; Ok(format!("Max bet set to ${}", v)) }
@@ -473,6 +524,22 @@ Daily Loss Limit: ${}
                                 "daily_limit" => {
                                     match value.parse::<f64>() {
                                         Ok(v) => { config.tools.betting.daily_loss_limit_usdc = v; Ok(format!("Daily loss limit set to ${}", v)) }
+                                        Err(_) => Err("Invalid number".to_string())
+                                    }
+                                }
+                                "strategy" => {
+                                    match value.to_lowercase().as_str() {
+                                        "value" | "momentum" | "contrarian" => {
+                                            config.tools.betting.strategy = value.to_lowercase();
+                                            Ok(format!("Strategy set to: {}", value.to_lowercase()))
+                                        }
+                                        _ => Err("Strategy must be: value, momentum, or contrarian".to_string())
+                                    }
+                                }
+                                "scan_interval" => {
+                                    match value.parse::<u64>() {
+                                        Ok(v) if v >= 1 => { config.tools.betting.scan_interval_minutes = v; Ok(format!("Scan interval set to {} min", v)) }
+                                        Ok(_) => Err("Scan interval must be at least 1 minute".to_string()),
                                         Err(_) => Err("Invalid number".to_string())
                                     }
                                 }
@@ -537,6 +604,13 @@ Daily Loss Limit: ${}
                                     "gemini_key" => if let Some(p) = config.providers.gemini.as_mut() { p.api_key.clear(); modified = true; },
                                     "openrouter_key" => if let Some(p) = config.providers.openrouter.as_mut() { p.api_key.clear(); modified = true; },
                                     "model" => { config.agents.defaults.model = crate::config::Config::default().agents.defaults.model; modified = true; },
+                                    "max_tokens" => { config.agents.defaults.max_tokens = crate::config::AgentDefaults::default().max_tokens; modified = true; },
+                                    "temperature" => { config.agents.defaults.temperature = crate::config::AgentDefaults::default().temperature; modified = true; },
+                                    "betting_enabled" => { config.tools.betting.enabled = false; modified = true; },
+                                    "max_bet" => { config.tools.betting.max_bet_size_usdc = 5.0; modified = true; },
+                                    "daily_limit" => { config.tools.betting.daily_loss_limit_usdc = 20.0; modified = true; },
+                                    "strategy" => { config.tools.betting.strategy = "value".to_string(); modified = true; },
+                                    "scan_interval" => { config.tools.betting.scan_interval_minutes = 15; modified = true; },
                                     "polymarket_key" => { config.tools.polymarket.private_key = None; modified = true; },
                                     "solana_key" => { config.tools.solana_private_key = None; modified = true; },
                                     _ => {
