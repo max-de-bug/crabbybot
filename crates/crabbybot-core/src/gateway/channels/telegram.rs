@@ -283,6 +283,42 @@ impl TelegramTransport {
                                 }
                             };
 
+                            // Detect which provider the current model belongs to
+                            let model_str = &config.agents.defaults.model;
+                            let model_lower = model_str.to_lowercase();
+                            let detected_provider = if model_lower.starts_with("gemini") {
+                                "Gemini"
+                            } else if model_lower.starts_with("claude") || model_lower.starts_with("anthropic/") {
+                                "Anthropic"
+                            } else if model_lower.starts_with("gpt") || model_lower.starts_with("o1") || model_lower.starts_with("o3") || model_lower.starts_with("openai/") {
+                                "OpenAI"
+                            } else if model_lower.starts_with("deepseek") {
+                                "DeepSeek"
+                            } else if model_lower.starts_with("llama") || model_lower.starts_with("mixtral") || model_lower.starts_with("groq/") {
+                                "Groq"
+                            } else if model_lower.contains('/') {
+                                "OpenRouter"
+                            } else {
+                                "Unknown"
+                            };
+
+                            // Check if the detected provider has a valid key
+                            let provider_has_key = match detected_provider {
+                                "Gemini" => gemini_key != "❌ not set",
+                                "Anthropic" => anthropic_key != "❌ not set",
+                                "OpenAI" => openai_key != "❌ not set",
+                                "DeepSeek" => deepseek_key != "❌ not set",
+                                "Groq" => groq_key != "❌ not set",
+                                "OpenRouter" => openrouter_key != "❌ not set",
+                                _ => false,
+                            };
+
+                            let model_status = if provider_has_key {
+                                format!("{} → {} ✅", model_str, detected_provider)
+                            } else {
+                                format!("{} → {} ⚠️ (no API key!)", model_str, detected_provider)
+                            };
+
                             let summary = format!(
 "⚙️ CrabbyBot Configuration
 
@@ -329,7 +365,7 @@ Daily Loss Limit: ${}
                                 p_label("deepseek", "DeepSeek"), deepseek_key,
                                 p_label("gemini", "Gemini"), gemini_key,
                                 p_label("openrouter", "OpenRouter"), openrouter_key,
-                                config.agents.defaults.model,
+                                model_status,
                                 config.agents.defaults.max_tokens,
                                 poly_key, solana_key,
                                 if config.tools.betting.enabled { "🟢" } else { "🔴" },

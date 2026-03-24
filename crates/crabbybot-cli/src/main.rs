@@ -480,15 +480,25 @@ async fn cmd_bot() -> Result<()> {
 
     // ── Restart loop ─────────────────────────────────────────────────
     loop {
+        tracing::info!("Starting cmd_bot_once iteration...");
         let cancel = CancellationToken::new();
-        cmd_bot_once(cancel).await?;
+        match cmd_bot_once(cancel).await {
+            Ok(_) => tracing::info!("cmd_bot_once finished successfully."),
+            Err(e) => {
+                tracing::error!("cmd_bot_once failed with error: {:?}", e);
+                return Err(e);
+            }
+        }
 
         if !crabbybot_core::take_restart_request() {
+            tracing::info!("No restart requested. Exiting loop.");
             break;
         }
+        tracing::info!("Restart requested! Sleeping briefly before re-initializing...");
         println!("  🔄 Restarting CrabbyBot...");
         // Small delay to let sockets and resources clean up
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tracing::info!("Wake up from sleep, starting new loop iteration.");
     }
 
     Ok(())
@@ -682,9 +692,11 @@ async fn cmd_bot_once(cancel: CancellationToken) -> Result<()> {
     // Wait for cancel token, Ctrl+C, or for any critical service to exit unexpectedly.
     tokio::select! {
         _ = cancel.cancelled() => {
+            tracing::info!("Shutdown signal received via CancellationToken!");
             println!("\n  ⏳ Shutting down gracefully...");
         }
         _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Shutdown signal received via Ctrl-C!");
             println!("\n  ⏳ Shutting down gracefully...");
         }
         res = services.join_next() => {
@@ -696,10 +708,14 @@ async fn cmd_bot_once(cancel: CancellationToken) -> Result<()> {
         }
     }
 
+    tracing::info!("Cancelling remaining tasks...");
     cancel.cancel();
+    
+    tracing::info!("Waiting for services to cleanly shutdown (max 2s)...");
     // Give services a moment to clean up before hard-exiting.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), services.shutdown()).await;
 
+    tracing::info!("Shutdown complete!");
     println!("  ✅ Shutdown complete.");
     Ok(())
 }
